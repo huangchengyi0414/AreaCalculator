@@ -1,0 +1,586 @@
+<script type="text/javascript">
+        var gk_isXlsx = false;
+        var gk_xlsxFileLookup = {};
+        var gk_fileData = {};
+        function filledCell(cell) {
+          return cell !== '' && cell != null;
+        }
+        function loadFileData(filename) {
+        if (gk_isXlsx && gk_xlsxFileLookup[filename]) {
+            try {
+                var workbook = XLSX.read(gk_fileData[filename], { type: 'base64' });
+                var firstSheetName = workbook.SheetNames[0];
+                var worksheet = workbook.Sheets[firstSheetName];
+
+                // Convert sheet to JSON to filter blank rows
+                var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, blankrows: false, defval: '' });
+                // Filter out blank rows (rows where all cells are empty, null, or undefined)
+                var filteredData = jsonData.filter(row => row.some(filledCell));
+
+                // Heuristic to find the header row by ignoring rows with fewer filled cells than the next row
+                var headerRowIndex = filteredData.findIndex((row, index) =>
+                  row.filter(filledCell).length >= filteredData[index + 1]?.filter(filledCell).length
+                );
+                // Fallback
+                if (headerRowIndex === -1 || headerRowIndex > 25) {
+                  headerRowIndex = 0;
+                }
+
+                // Convert filtered JSON back to CSV
+                var csv = XLSX.utils.aoa_to_sheet(filteredData.slice(headerRowIndex)); // Create a new sheet from filtered array of arrays
+                csv = XLSX.utils.sheet_to_csv(csv, { header: 1 });
+                return csv;
+            } catch (e) {
+                console.error(e);
+                return "";
+            }
+        }
+        return gk_fileData[filename] || "";
+        }
+        </script><!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <title>面積計算器</title>
+    <style>
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        canvas {
+            border: 1px solid #ccc;
+            margin: 10px 0;
+        }
+        .btn {
+            padding: 8px 16px;
+            margin: 5px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        .btn:hover {
+            background-color: #45a049;
+        }
+        .btn.active {
+            background-color: #45a049;
+            box-shadow: inset 0 0 5px rgba(0,0,0,0.2);
+        }
+        .scale-input {
+            display: none;
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #f8f8f8;
+            border-radius: 4px;
+        }
+        .instructions {
+            background-color: #f8f8f8;
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+        }
+        #result {
+            position: fixed;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: rgba(255, 255, 255, 0.9);
+            padding: 10px;
+            border-radius: 4px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2);
+            z-index: 1000;
+            display: none;
+        }
+        .tool-group {
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>面積計算器</h2>
+        
+        <div class="instructions">
+            <h3>使用說明：</h3>
+            <ol>
+                <li>上傳圖片</li>
+                <li>設定比例尺：點擊兩點並輸入實際長度</li>
+                <li>選擇工具：
+                    <ul>
+                        <li>直線工具：點擊創建直線連接點</li>
+                        <li>鋼筆工具：點擊創建曲線，可調整控制點</li>
+                    </ul>
+                </li>
+                <li>完成後閉合路徑並計算面積</li>
+            </ol>
+        </div>
+
+        <input type="file" id="imageInput" accept="image/*">
+        <div class="tool-group">
+            <button class="btn" id="scaleMode">設定比例尺</button>
+            <button class="btn" id="lineMode">直線工具</button>
+            <button class="btn" id="penMode">鋼筆工具</button>
+            <button class="btn" id="closePathBtn">閉合路徑</button>
+            <button class="btn" id="clearBtn">清除標記</button>
+            <button class="btn" id="calculateBtn">計算面積</button>
+        </div>
+
+        <div id="scaleInput" class="scale-input">
+            <label>實際長度：</label>
+            <input type="number" id="realLength" step="0.1">
+            <select id="unitSelect">
+                <option value="mm">毫米</option>
+                <option value="cm">公分</option>
+                <option value="m">公尺</option>
+            </select>
+            <button class="btn" id="confirmScale">確定</button>
+            <button class="btn" id="clearScale">清除比例尺</button>
+            <div id="scaleInfo"></div>
+        </div>
+        
+        <div id="result"></div>
+        
+        <canvas id="canvas" width="600" height="400"></canvas>
+    </div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const imageInput = document.getElementById('imageInput');
+        const scaleMode = document.getElementById('scaleMode');
+        const lineMode = document.getElementById('lineMode');
+        const penMode = document.getElementById('penMode');
+        const closePathBtn = document.getElementById('closePathBtn');
+        const clearBtn = document.getElementById('clearBtn');
+        const calculateBtn = document.getElementById('calculateBtn');
+        const scaleInput = document.getElementById('scaleInput');
+        const realLengthInput = document.getElementById('realLength');
+        const unitSelect = document.getElementById('unitSelect');
+        const scaleInfo = document.getElementById('scaleInfo');
+        const result = document.getElementById('result');
+
+        let image = null;
+        let points = [];
+        let scalePoints = [];
+        let currentMode = 'none';
+        let isPathClosed = false;
+        let pixelPerUnit = null;
+        let selectedPoint = null;
+        let selectedControl = null;
+        let isDragging = false;
+
+        // 點的建構函數
+        function Point(x, y) {
+            this.x = x;
+            this.y = y;
+            this.cp1x = x;
+            this.cp1y = y - 50;
+            this.cp2x = x;
+            this.cp2y = y + 50;
+        }
+
+        // 圖片載入處理
+        imageInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                image = new Image();
+                image.onload = function() {
+                    const maxWidth = 800;
+                    const maxHeight = 600;
+                    let width = image.width;
+                    let height = image.height;
+                    
+                    if (width > maxWidth) {
+                        height = (maxWidth / width) * height;
+                        width = maxWidth;
+                    }
+                    if (height > maxHeight) {
+                        width = (maxHeight / height) * width;
+                        height = maxHeight;
+                    }
+                    
+                    canvas.width = width;
+                    canvas.height = height;
+                    resetAll();
+                    redraw();
+                };
+                image.src = event.target.result;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        function resetAll() {
+            points = [];
+            scalePoints = [];
+            isPathClosed = false;
+            pixelPerUnit = null;
+            result.textContent = '';
+            result.style.display = 'none';
+            scaleInfo.textContent = '';
+        }
+
+        // 模式切換
+        scaleMode.addEventListener('click', () => setMode('scale'));
+        lineMode.addEventListener('click', () => setMode('line'));
+        penMode.addEventListener('click', () => setMode('pen'));
+
+        function setMode(mode) {
+            currentMode = currentMode === mode ? 'none' : mode;
+            updateButtonStates();
+        }
+
+        function updateButtonStates() {
+            scaleMode.classList.toggle('active', currentMode === 'scale');
+            lineMode.classList.toggle('active', currentMode === 'line');
+            penMode.classList.toggle('active', currentMode === 'pen');
+            scaleInput.style.display = currentMode === 'scale' ? 'block' : 'none';
+        }
+
+        // 清除功能
+        clearBtn.addEventListener('click', function() {
+            resetAll();
+            redraw();
+        });
+
+        // 確認比例尺
+        document.getElementById('confirmScale').addEventListener('click', function() {
+            if (scalePoints.length !== 2) {
+                alert('請先在圖片上標記兩個點！');
+                return;
+            }
+            
+            const realLength = parseFloat(realLengthInput.value);
+            if (!realLength) {
+                alert('請輸入有效的實際長度！');
+                return;
+            }
+
+            const length = Math.sqrt(
+                Math.pow(scalePoints[1].x - scalePoints[0].x, 2) +
+                Math.pow(scalePoints[1].y - scalePoints[0].y, 2)
+            );
+            
+            pixelPerUnit = length / realLength;
+            scaleInfo.textContent = `比例尺已設定：${realLength}${unitSelect.value} = ${Math.round(length)}像素`;
+        });
+
+        // 清除比例尺
+        document.getElementById('clearScale').addEventListener('click', function() {
+            scalePoints = [];
+            pixelPerUnit = null;
+            scaleInfo.textContent = '';
+            redraw();
+        });
+
+        // 閉合路徑
+        closePathBtn.addEventListener('click', function() {
+            if (points.length >= 3) {
+                isPathClosed = true;
+                redraw();
+            }
+        });
+
+        // 計算面積
+        calculateBtn.addEventListener('click', function() {
+            if (!isPathClosed || points.length < 3) {
+                alert('請先閉合路徑！');
+                return;
+            }
+
+            if (!pixelPerUnit) {
+                alert('請先設定比例尺！');
+                return;
+            }
+
+            const area = calculatePolygonArea();
+            if (area === null) {
+                alert('面積計算錯誤！請檢查路徑是否正確。');
+                return;
+            }
+
+            let realArea = area / (pixelPerUnit * pixelPerUnit);
+            let displayArea;
+            let displayUnit;
+            
+            switch (unitSelect.value) {
+                case 'mm':
+                    displayArea = realArea;
+                    displayUnit = 'mm²';
+                    break;
+                case 'cm':
+                    displayArea = realArea;
+                    displayUnit = 'cm²';
+                    break;
+                case 'm':
+                    displayArea = realArea / 10000;
+                    displayUnit = 'm²';
+                    break;
+            }
+
+            let precision = displayArea < 1 ? 3 : (displayArea < 100 ? 2 : 1);
+            result.textContent = `面積：${displayArea.toFixed(precision)} ${displayUnit}`;
+            result.style.display = 'block';
+        });
+
+        function calculatePolygonArea() {
+            try {
+                let vertices = [];
+                
+                if (currentMode === 'line') {
+                    vertices = points.map(p => ({x: p.x, y: p.y}));
+                } else {
+                    const samples = 50;
+                    for (let i = 0; i < points.length; i++) {
+                        const current = points[i];
+                        const next = points[(i + 1) % points.length];
+                        
+                        vertices.push({x: current.x, y: current.y});
+                        
+                        for (let j = 1; j < samples; j++) {
+                            const t = j / samples;
+                            const point = getBezierPoint(current, next, t);
+                            vertices.push(point);
+                        }
+                    }
+                }
+                
+                let area = 0;
+                for (let i = 0; i < vertices.length; i++) {
+                    const j = (i + 1) % vertices.length;
+                    area += vertices[i].x * vertices[j].y;
+                    area -= vertices[j].x * vertices[i].y;
+                }
+                area = Math.abs(area / 2);
+                
+                if (isNaN(area) || area <= 0) {
+                    console.error('Invalid area calculation result');
+                    return null;
+                }
+                
+                return area;
+            } catch (error) {
+                console.error('Error calculating area:', error);
+                return null;
+            }
+        }
+
+        // 滑鼠事件處理
+        canvas.addEventListener('mousedown', function(e) {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (currentMode === 'scale') {
+                if (scalePoints.length < 2) {
+                    scalePoints.push({x, y});
+                    redraw();
+                }
+            } else if (currentMode === 'line' || currentMode === 'pen') {
+                if (currentMode === 'pen') {
+                    const controlPoint = findControlPoint(x, y);
+                    if (controlPoint) {
+                        selectedControl = controlPoint;
+                        isDragging = true;
+                        return;
+                    }
+                }
+
+                const anchorPoint = findAnchorPoint(x, y);
+                if (anchorPoint !== null) {
+                    selectedPoint = anchorPoint;
+                    isDragging = true;
+                    return;
+                }
+
+                if (!isPathClosed) {
+                    if (currentMode === 'pen') {
+                        const newPoint = new Point(x, y);
+                        if (points.length > 0) {
+                            const lastPoint = points[points.length - 1];
+                            lastPoint.cp2x = lastPoint.x + (x - lastPoint.x) / 3;
+                            lastPoint.cp2y = lastPoint.y + (y - lastPoint.y) / 3;
+                            newPoint.cp1x = x - (x - lastPoint.x) / 3;
+                            newPoint.cp1y = y - (y - lastPoint.y) / 3;
+                        }
+                        points.push(newPoint);
+                    } else {
+                        points.push({x, y});
+                    }
+                    redraw();
+                }
+            }
+        });
+
+        canvas.addEventListener('mousemove', function(e) {
+            if (!isDragging) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            if (currentMode === 'pen' && selectedControl) {
+                const point = points[selectedControl.pointIndex];
+                if (selectedControl.type === 'cp1') {
+                    point.cp1x = x;
+                    point.cp1y = y;
+                } else {
+                    point.cp2x = x;
+                    point.cp2y = y;
+                }
+            } else if (selectedPoint !== null) {
+                if (currentMode === 'pen') {
+                    const point = points[selectedPoint];
+                    const dx = x - point.x;
+                    const dy = y - point.y;
+                    point.x = x;
+                    point.y = y;
+                    point.cp1x += dx;
+                    point.cp1y += dy;
+                    point.cp2x += dx;
+                    point.cp2y += dy;
+                } else {
+                    points[selectedPoint].x = x;
+                    points[selectedPoint].y = y;
+                }
+            }
+            redraw();
+        });
+
+        canvas.addEventListener('mouseup', function() {
+            isDragging = false;
+            selectedPoint = null;
+            selectedControl = null;
+        });
+
+        function findControlPoint(x, y) {
+            const threshold = 5;
+            for (let i = 0; i < points.length; i++) {
+                const point = points[i];
+                if (Math.abs(x - point.cp1x) < threshold && Math.abs(y - point.cp1y) < threshold) {
+                    return {pointIndex: i, type: 'cp1'};
+                }
+                if (Math.abs(x - point.cp2x) < threshold && Math.abs(y - point.cp2y) < threshold) {
+                    return {pointIndex: i, type: 'cp2'};
+                }
+            }
+            return null;
+        }
+
+        function findAnchorPoint(x, y) {
+            const threshold = 5;
+            for (let i = 0; i < points.length; i++) {
+                if (Math.abs(x - points[i].x) < threshold && Math.abs(y - points[i].y) < threshold) {
+                    return i;
+                }
+            }
+            return null;
+        }
+
+        function getBezierPoint(p1, p2, t) {
+            const mt = 1 - t;
+            const mt2 = mt * mt;
+            const mt3 = mt2 * mt;
+            const t2 = t * t;
+            const t3 = t2 * t;
+            
+            return {
+                x: mt3 * p1.x + 3 * mt2 * t * p1.cp2x + 3 * mt * t2 * p2.cp1x + t3 * p2.x,
+                y: mt3 * p1.y + 3 * mt2 * t * p1.cp2y + 3 * mt * t2 * p2.cp1y + t3 * p2.y
+            };
+        }
+
+        function redraw() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if (image && image.complete) {
+                ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+            }
+
+            // 繪製比例尺
+            if (scalePoints.length > 0) {
+                ctx.beginPath();
+                ctx.moveTo(scalePoints[0].x, scalePoints[0].y);
+                if (scalePoints.length > 1) {
+                    ctx.lineTo(scalePoints[1].x, scalePoints[1].y);
+                }
+                ctx.strokeStyle = 'blue';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                scalePoints.forEach(point => {
+                    ctx.beginPath();
+                    ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+                    ctx.fillStyle = 'blue';
+                    ctx.fill();
+                });
+            }
+
+            // 繪製路徑
+            if (points.length > 0) {
+                ctx.beginPath();
+                ctx.moveTo(points[0].x, points[0].y);
+
+                for (let i = 1; i < points.length; i++) {
+                    const prev = points[i - 1];
+                    const curr = points[i];
+                    if (currentMode === 'pen') {
+                        ctx.bezierCurveTo(
+                            prev.cp2x, prev.cp2y,
+                            curr.cp1x, curr.cp1y,
+                            curr.x, curr.y
+                        );
+                    } else {
+                        ctx.lineTo(curr.x, curr.y);
+                    }
+                }
+
+                if (isPathClosed && points.length > 2) {
+                    const last = points[points.length - 1];
+                    const first = points[0];
+                    if (currentMode === 'pen') {
+                        ctx.bezierCurveTo(
+                            last.cp2x, last.cp2y,
+                            first.cp1x, first.cp1y,
+                            first.x, first.y
+                        );
+                    } else {
+                        ctx.lineTo(first.x, first.y);
+                    }
+                }
+
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // 繪製錨點和控制點
+                points.forEach((point, index) => {
+                    ctx.fillStyle = 'blue';
+                    ctx.beginPath();
+                    ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    if (currentMode === 'pen') {
+                        ctx.fillStyle = 'green';
+                        ctx.beginPath();
+                        ctx.arc(point.cp1x, point.cp1y, 4, 0, Math.PI * 2);
+                        ctx.arc(point.cp2x, point.cp2y, 4, 0, Math.PI * 2);
+                        ctx.fill();
+
+                        ctx.beginPath();
+                        ctx.moveTo(point.x, point.y);
+                        ctx.lineTo(point.cp1x, point.cp1y);
+                        ctx.moveTo(point.x, point.y);
+                        ctx.lineTo(point.cp2x, point.cp2y);
+                        ctx.strokeStyle = 'rgba(0,255,0,0.3)';
+                        ctx.stroke();
+                    }
+                });
+            }
+        }
+    </script>
+</body>
+</html>
